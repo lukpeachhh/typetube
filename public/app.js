@@ -703,37 +703,22 @@ function looksLikeYouTubeUrlOrId(input) {
   return input.includes('youtube.com/') || input.includes('youtu.be/');
 }
 
-// Helper: Fetch from Netlify API first; if YouTube blocks Netlify's cloud IP, automatically fall back to local residential server (http://localhost:3000)
-async function fetchApiWithLocalFallback(apiPath) {
-  try {
-    const res = await fetch(apiPath);
-    if (res.ok) {
-      return await res.json();
-    }
-    // If running on Netlify and YouTube blocked the datacenter IP, try localhost:3000 bridge
-    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      try {
-        const localRes = await fetch(`http://localhost:3000${apiPath}`);
-        if (localRes.ok) {
-          return await localRes.json();
-        }
-      } catch (localErr) {
-        // localhost:3000 not running on this machine
-      }
-    }
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error || 'โหลดข้อมูลไม่สำเร็จ');
-  } catch (err) {
-    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      try {
-        const localRes = await fetch(`http://localhost:3000${apiPath}`);
-        if (localRes.ok) {
-          return await localRes.json();
-        }
-      } catch (e) {}
-    }
-    throw err;
+// In-memory cache so re-loading the same clip/language uses 0 quota
+const transcriptCache = new Map();
+
+async function fetchApi(apiPath) {
+  if (transcriptCache.has(apiPath)) {
+    return transcriptCache.get(apiPath);
   }
+  const res = await fetch(apiPath);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || 'โหลดข้อมูลไม่สำเร็จ');
+  }
+  if (apiPath.startsWith('/api/transcript') && data.lines && data.lines.length > 0) {
+    transcriptCache.set(apiPath, data);
+  }
+  return data;
 }
 
 async function handleSearchOrLoad() {
@@ -749,7 +734,7 @@ async function handleSearchOrLoad() {
   modalErrorMsg.classList.add('hidden');
 
   try {
-    const data = await fetchApiWithLocalFallback(`/api/search?q=${encodeURIComponent(query)}`);
+    const data = await fetchApi(`/api/search?q=${encodeURIComponent(query)}`);
 
     if (!data || !data.results) {
       modalErrorMsg.textContent = 'ไม่พบผลการค้นหา';
@@ -800,7 +785,7 @@ async function loadClip(videoInput, preferredLang = '') {
   modalErrorMsg.classList.add('hidden');
 
   try {
-    const data = await fetchApiWithLocalFallback(`/api/transcript?v=${encodeURIComponent(videoInput)}&lang=${encodeURIComponent(preferredLang)}`);
+    const data = await fetchApi(`/api/transcript?v=${encodeURIComponent(videoInput)}&lang=${encodeURIComponent(preferredLang)}`);
 
     if (!data || !data.lines || data.lines.length === 0) {
       modalErrorMsg.textContent = (data && data.error) || 'คลิปนี้ไม่มีซับไตเติ้ล';

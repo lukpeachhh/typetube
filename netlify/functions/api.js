@@ -1,4 +1,6 @@
+const http = require('http');
 const https = require('https');
+const tls = require('tls');
 const { URL } = require('url');
 
 function extractVideoId(input) {
@@ -22,31 +24,121 @@ function extractVideoId(input) {
   return null;
 }
 
+// Parse Webshare proxy format: supports either `http://user:pass@host:port` OR `host:port:user:pass`
+// Also supports multiple proxies separated by commas or newlines (rotates randomly!)
+function getProxyConfig() {
+  const raw = (process.env.PROXY_URL || process.env.WEBSHARE_PROXY || '').trim();
+  if (!raw) return null;
+
+  const entries = raw.split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean);
+  if (!entries.length) return null;
+  const pick = entries[Math.floor(Math.random() * entries.length)];
+
+  if (pick.startsWith('http://') || pick.startsWith('https://')) {
+    try {
+      const u = new URL(pick);
+      return {
+        host: u.hostname,
+        port: Number(u.port),
+        auth: u.username ? `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}` : null
+      };
+    } catch (e) {}
+  }
+
+  // Format: host:port:username:password
+  const parts = pick.split(':');
+  if (parts.length >= 4) {
+    return {
+      host: parts[0],
+      port: Number(parts[1]),
+      auth: `${parts[2]}:${parts.slice(3).join(':')}`
+    };
+  } else if (parts.length === 2) {
+    return {
+      host: parts[0],
+      port: Number(parts[1]),
+      auth: null
+    };
+  }
+  return null;
+}
+
+// Zero-dependency HTTPS fetch supporting HTTP CONNECT proxy tunneling (Webshare)
 function fetchUrl(urlStr, options = {}) {
+  const proxy = getProxyConfig();
+
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
-    const reqOptions = {
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      method: options.method || 'GET',
-      headers: {
-        'Accept-Language': 'th,en-US;q=0.9,en;q=0.8',
-        ...(options.headers || {})
-      }
+    const targetPort = Number(u.port) || 443;
+    const reqHeaders = {
+      'Host': u.hostname,
+      'Accept-Language': 'th,en-US;q=0.9,en;q=0.8',
+      ...(options.headers || {})
     };
 
-    const req = https.request(reqOptions, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return resolve(fetchUrl(res.headers.location, options));
-      }
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, data, headers: res.headers }));
+    if (options.body) {
+      reqHeaders['Content-Length'] = Buffer.byteLength(options.body);
+    }
+
+    const executeHttpsRequest = (createConnectionFn) => {
+      const reqOptions = {
+        hostname: u.hostname,
+        port: targetPort,
+        path: u.pathname + u.search,
+        method: options.method || 'GET',
+        headers: reqHeaders,
+        ...(createConnectionFn ? { createConnection: createConnectionFn, agent: false } : {})
+      };
+
+      const req = https.request(reqOptions, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return resolve(fetchUrl(res.headers.location, options));
+        }
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve({ status: res.statusCode, data, headers: res.headers }));
+      });
+
+      req.on('error', reject);
+      if (options.body) req.write(options.body);
+      req.end();
+    };
+
+    if (!proxy) {
+      return executeHttpsRequest(null);
+    }
+
+    // Tunnel HTTPS through Webshare HTTP Proxy using CONNECT
+    const connectHeaders = {
+      'Host': `${u.hostname}:${targetPort}`
+    };
+    if (proxy.auth) {
+      connectHeaders['Proxy-Authorization'] = 'Basic ' + Buffer.from(proxy.auth).toString('base64');
+    }
+
+    const connectReq = http.request({
+      host: proxy.host,
+      port: proxy.port,
+      method: 'CONNECT',
+      path: `${u.hostname}:${targetPort}`,
+      headers: connectHeaders
     });
 
-    req.on('error', reject);
-    if (options.body) req.write(options.body);
-    req.end();
+    connectReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        return reject(new Error(`Proxy CONNECT failed with status ${res.statusCode}`));
+      }
+      const tlsSocket = tls.connect({
+        socket,
+        servername: u.hostname
+      });
+      tlsSocket.on('error', reject);
+      executeHttpsRequest(() => tlsSocket);
+    });
+
+    connectReq.on('error', reject);
+    connectReq.end();
   });
 }
 
@@ -124,16 +216,6 @@ const INNERTUBE_CLIENTS = [
     osVersion: '14',
     androidSdkVersion: 34,
     userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
-  },
-  {
-    clientName: 'ANDROID_VR',
-    clientVersion: '1.60.19',
-    deviceMake: 'Oculus',
-    deviceModel: 'Quest 3',
-    osName: 'Android',
-    osVersion: '12L',
-    androidSdkVersion: 32,
-    userAgent: 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip'
   }
 ];
 
@@ -193,7 +275,6 @@ async function searchYouTubeVideos(query) {
 async function getYouTubeCaptionTracks(videoId) {
   let lastStatus = '';
 
-  // 1. Try clean mobile/VR Innertube clients directly WITHOUT desktop web cookies
   for (const client of INNERTUBE_CLIENTS) {
     try {
       const body = JSON.stringify({
@@ -231,34 +312,15 @@ async function getYouTubeCaptionTracks(videoId) {
       if (tracks && tracks.length > 0) {
         return { title, author, tracks, userAgent: client.userAgent, lastStatus };
       }
-    } catch (err) {}
-  }
-
-  // 2. Fallback: Fetch via Google Translate Proxy (uses Google IPs, bypassing AWS IP block on watch page!)
-  try {
-    const gtUrl = `https://www-youtube-com.translate.goog/watch?v=${videoId}&_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en`;
-    const gtRes = await fetchUrl(gtUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-      }
-    });
-    const prMatch = gtRes.data.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|window|<\/script>)/);
-    if (prMatch) {
-      const pr = JSON.parse(prMatch[1]);
-      const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      const title = pr?.videoDetails?.title || 'YouTube Video';
-      const author = pr?.videoDetails?.author || '';
-      if (tracks && tracks.length > 0) {
-        return { title, author, tracks, userAgent: INNERTUBE_CLIENTS[0].userAgent, lastStatus: 'GTRANSLATE_OK' };
-      }
+    } catch (err) {
+      lastStatus = err.message;
     }
-  } catch (e) {}
+  }
 
   return { title: 'YouTube Video', author: '', tracks: [], userAgent: INNERTUBE_CLIENTS[0].userAgent, lastStatus };
 }
 
 async function fetchTranscriptFromUrl(baseUrl, userAgent) {
-  // Remove `&exp=xpe` if present so YouTube doesn't return 0-byte response
   const cleanedUrl = baseUrl.replace(/&exp=xpe/g, '');
   const res = await fetchUrl(cleanedUrl, {
     headers: { 'User-Agent': userAgent || INNERTUBE_CLIENTS[0].userAgent }
@@ -266,7 +328,7 @@ async function fetchTranscriptFromUrl(baseUrl, userAgent) {
 
   const raw = res.data || '';
   if (!raw.trim()) {
-    throw new Error('YouTube บล็อกการดึงเนื้อหาซับจากเซิร์ฟเวอร์คลาวด์ (Empty timedtext)');
+    throw new Error('Empty timedtext response');
   }
 
   const rawLines = [];
@@ -369,12 +431,13 @@ exports.handler = async (event) => {
       const { title, author, tracks, userAgent, lastStatus } = await getYouTubeCaptionTracks(videoId);
 
       if (!tracks || tracks.length === 0) {
+        const hasProxy = Boolean(getProxyConfig());
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({
-            error: lastStatus === 'LOGIN_REQUIRED'
-              ? 'YouTube บล็อก IP ของเซิร์ฟเวอร์ Netlify (LOGIN_REQUIRED)'
+            error: lastStatus === 'LOGIN_REQUIRED' && !hasProxy
+              ? 'กรุณาตั้งค่า PROXY_URL (Webshare) ใน Netlify Environment Variables เพื่อปลดบล็อก IP ของ Netlify'
               : `คลิปนี้ไม่มีซับไตเติ้ลบน YouTube (${lastStatus || 'NO_TRACKS'})`,
             videoId,
             title,
