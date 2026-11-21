@@ -302,20 +302,36 @@ window.onYouTubeIframeAPIReady = function () {
       rel: 0,
       modestbranding: 1,
       controls: 1,
-      autoplay: 0,
       cc_load_policy: 0
     },
     events: {
       onReady: () => {
         isPlayerReady = true;
+        if ( player && typeof player.unMute === 'function') {
+          player.unMute();
+          player.setVolume(100);
+        }
         if (currentVideoId) {
-          player.cueVideoById(currentVideoId);
+          const firstStart = transcriptLines[0]?.start || 0;
+          player.loadVideoById({ videoId: currentVideoId, startSeconds: Math.max(0, firstStart) });
         }
         startSyncLoop();
       }
     }
   });
 };
+
+function ensureAudioUnmuted() {
+  if (!isPlayerReady || !player) return;
+  try {
+    if (typeof player.isMuted === 'function' && player.isMuted()) {
+      player.unMute();
+    }
+    if (typeof player.getVolume === 'function' && player.getVolume() === 0) {
+      player.setVolume(100);
+    }
+  } catch (e) {}
+}
 
 function startSyncLoop() {
   if (syncTimer) clearInterval(syncTimer);
@@ -613,11 +629,12 @@ function handlePeerMessage(conn, msg) {
       videoSection.classList.remove('hidden');
       targetTextDisplay.classList.remove('text-slate-400');
 
-      // Cue video paused so it does NOT auto-play before the race starts
-      if (isPlayerReady && player && player.cueVideoById) {
-        player.cueVideoById(currentVideoId);
-      }
       resetStats();
+      if (isPlayerReady && player && player.loadVideoById) {
+        const firstStart = transcriptLines[0]?.start || 0;
+        ensureAudioUnmuted();
+        player.loadVideoById({ videoId: currentVideoId, startSeconds: Math.max(0, firstStart) });
+      }
       goToLine(0, false);
     } else if (msg.type === 'ROOM_STATE') {
       roomPlayers = msg.players || {};
@@ -917,11 +934,12 @@ function applyLoadedClip(videoId, title, selectedLang, lines, availableTracks) {
   scoreModal.classList.add('hidden');
   resetStats();
 
-  // Cue the video paused first so it doesn't auto-play unexpectedly; only play when user starts or race starts
-  if (isPlayerReady && player && player.cueVideoById) {
-    player.cueVideoById(currentVideoId);
+  if (isPlayerReady && player && player.loadVideoById) {
+    const firstStart = transcriptLines[0]?.start || 0;
+    ensureAudioUnmuted();
+    player.loadVideoById({ videoId: currentVideoId, startSeconds: Math.max(0, firstStart) });
   }
-  goToLine(0, !currentRoomCode);
+  goToLine(0, false);
   focusTyping();
 
   if (isRoomHost && currentRoomCode) {
@@ -1009,6 +1027,7 @@ function goToLine(index, seekVideo = true) {
   updateStatsUI();
 
   if (seekVideo && !isGameFinished && isPlayerReady && player && typeof player.seekTo === 'function') {
+    ensureAudioUnmuted();
     player.seekTo(Math.max(0, line.start), true);
     player.playVideo();
   }
@@ -1112,6 +1131,7 @@ function replayCurrentLine() {
   if (!transcriptLines.length || isGameFinished) return;
   const line = transcriptLines[currentLineIndex];
   if (isPlayerReady && player) {
+    ensureAudioUnmuted();
     player.seekTo(Math.max(0, line.start), true);
     player.playVideo();
   }
