@@ -309,13 +309,10 @@ const server = http.createServer(async (req, res) => {
     try {
       const { title, author, tracks, userAgent } = await getYouTubeCaptionTracks(videoId);
 
-      // Keep ONLY authentic Manual CC tracks (exclude auto-generated ASR tracks)
-      const manualTracks = (tracks || []).filter(t => t.kind !== 'asr');
-
-      if (manualTracks.length === 0) {
+      if (!tracks || tracks.length === 0) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({
-          error: 'คลิปนี้ไม่มีซับแท้ (Manual CC) บน YouTube กรุณาค้นหาหรือเลือกคลิปที่มีซับแท้',
+          error: 'คลิปนี้ไม่มีซับไตเติ้ลบน YouTube กรุณาเลือกคลิปอื่น',
           videoId,
           title,
           author,
@@ -323,27 +320,36 @@ const server = http.createServer(async (req, res) => {
         }));
       }
 
-      const availableTracks = manualTracks.map(t => ({
+      const availableTracks = tracks.map(t => ({
         languageCode: t.languageCode,
         vssId: t.vssId,
-        name: t.name?.simpleText || t.name?.runs?.[0]?.text || t.languageCode
+        name: t.name?.simpleText || t.name?.runs?.[0]?.text || t.languageCode,
+        isAuto: t.kind === 'asr'
       }));
 
       availableTracks.sort((a, b) => {
-        const score = (code) => code.startsWith('th') ? 0 : code.startsWith('en') ? 1 : 2;
-        return score(a.languageCode) - score(b.languageCode);
+        const score = (tr) => {
+          let s = tr.languageCode.startsWith('th') ? 0 : tr.languageCode.startsWith('en') ? 2 : 4;
+          if (tr.isAuto) s += 1;
+          return s;
+        };
+        return score(a) - score(b);
       });
 
       let selectedTrack = null;
       if (preferredLang) {
-        selectedTrack = manualTracks.find(t => t.vssId === preferredLang) ||
-                        manualTracks.find(t => t.languageCode === preferredLang) ||
-                        manualTracks.find(t => t.languageCode.startsWith(preferredLang));
+        selectedTrack = tracks.find(t => t.vssId === preferredLang) ||
+                        tracks.find(t => t.languageCode === preferredLang && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode.startsWith(preferredLang) && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode === preferredLang) ||
+                        tracks.find(t => t.languageCode.startsWith(preferredLang));
       }
       if (!selectedTrack) {
-        selectedTrack = manualTracks.find(t => t.languageCode.startsWith('th')) ||
-                        manualTracks.find(t => t.languageCode.startsWith('en')) ||
-                        manualTracks[0];
+        selectedTrack = tracks.find(t => t.languageCode.startsWith('th') && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode.startsWith('en') && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode.startsWith('th')) ||
+                        tracks.find(t => t.languageCode.startsWith('en')) ||
+                        tracks[0];
       }
 
       const lines = await fetchTranscriptFromUrl(selectedTrack.baseUrl, userAgent);

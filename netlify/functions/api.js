@@ -31,6 +31,7 @@ function fetchUrl(urlStr, options = {}) {
       method: options.method || 'GET',
       headers: {
         'Accept-Language': 'th,en-US;q=0.9,en;q=0.8',
+        'Cookie': 'CONSENT=YES+cb; SOCS=CAI',
         ...(options.headers || {})
       }
     };
@@ -65,7 +66,7 @@ function decodeHtmlEntities(str) {
 
 function cleanSubtitleText(text) {
   if (!text) return '';
-  return decodeHtmlEntities(text.replace(/<[^>]+>/g, ''))
+  let out = decodeHtmlEntities(text.replace(/<[^>]+>/g, ''))
     .replace(/\r?\n/g, ' ')
     .replace(/\[.*?\]/g, '')
     .replace(/\(.*?\)/g, '')
@@ -79,18 +80,57 @@ function cleanSubtitleText(text) {
     .replace(/^[-–—>•]+\s*/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // Merge overly fragmented Thai spacing if needed
+  const thaiChars = (out.match(/[\u0E00-\u0E7F]/g) || []).length;
+  if (thaiChars > 5) {
+    const parts = out.split(' ');
+    if (parts.length >= 4) {
+      const avgLen = out.replace(/\s+/g, '').length / parts.length;
+      if (avgLen < 6.5) {
+        const merged = [];
+        let buf = '';
+        for (const p of parts) {
+          const isTh = /^[\u0E00-\u0E7F]+$/.test(p);
+          const bufIsTh = /^[\u0E00-\u0E7F]+$/.test(buf);
+          if (isTh && bufIsTh && (buf.length + p.length) <= 18) {
+            buf += p;
+          } else {
+            if (buf) merged.push(buf);
+            buf = p;
+          }
+        }
+        if (buf) merged.push(buf);
+        out = merged.join(' ');
+      }
+    }
+  }
+
+  return out;
 }
 
 const INNERTUBE_CLIENTS = [
   {
     clientName: 'IOS',
     clientVersion: '20.10.4',
+    deviceMake: 'Apple',
+    deviceModel: 'iPhone16,2',
+    osName: 'iPhone',
+    osVersion: '17.5.1.21F90',
     userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)'
   },
   {
     clientName: 'ANDROID',
     clientVersion: '20.10.38',
+    osName: 'Android',
+    osVersion: '14',
+    androidSdkVersion: 34,
     userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
+  },
+  {
+    clientName: 'WEB',
+    clientVersion: '2.20250312.04.00',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
   }
 ];
 
@@ -147,7 +187,37 @@ async function searchYouTubeVideos(query) {
   return results;
 }
 
+// Fetch visitorData & session cookies from YouTube watch page so cloud IPs (Netlify/AWS) work reliably
 async function getYouTubeCaptionTracks(videoId) {
+  let visitorData = undefined;
+  let cookieHeader = 'CONSENT=YES+cb; SOCS=CAI';
+  let pageTracks = null;
+  let pageTitle = 'YouTube Video';
+  let pageAuthor = '';
+
+  try {
+    const pageRes = await fetchUrl(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Cookie': cookieHeader
+      }
+    });
+    const setCookies = (pageRes.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
+    if (setCookies) {
+      cookieHeader = `${cookieHeader}; ${setCookies}`;
+    }
+    const vMatch = pageRes.data.match(/"VISITOR_DATA":"([^"]+)"/);
+    if (vMatch) visitorData = vMatch[1];
+
+    const prMatch = pageRes.data.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|window|<\/script>)/);
+    if (prMatch) {
+      const pr = JSON.parse(prMatch[1]);
+      pageTracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      pageTitle = pr?.videoDetails?.title || pageTitle;
+      pageAuthor = pr?.videoDetails?.author || pageAuthor;
+    }
+  } catch (e) {}
+
   for (const client of INNERTUBE_CLIENTS) {
     try {
       const body = JSON.stringify({
@@ -155,8 +225,14 @@ async function getYouTubeCaptionTracks(videoId) {
           client: {
             clientName: client.clientName,
             clientVersion: client.clientVersion,
+            deviceMake: client.deviceMake,
+            deviceModel: client.deviceModel,
+            osName: client.osName,
+            osVersion: client.osVersion,
+            androidSdkVersion: client.androidSdkVersion,
             hl: 'th',
-            gl: 'TH'
+            gl: 'TH',
+            visitorData
           }
         },
         videoId: videoId
@@ -166,33 +242,48 @@ async function getYouTubeCaptionTracks(videoId) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': client.userAgent
+          'User-Agent': client.userAgent,
+          'Cookie': cookieHeader,
+          ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {})
         },
         body
       });
 
       const json = JSON.parse(res.data);
       const tracks = json?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      const title = json?.videoDetails?.title || 'YouTube Video';
-      const author = json?.videoDetails?.author || '';
+      const title = json?.videoDetails?.title || pageTitle;
+      const author = json?.videoDetails?.author || pageAuthor;
 
       if (tracks && tracks.length > 0) {
-        return { title, author, tracks, userAgent: client.userAgent };
+        return { title, author, tracks, userAgent: client.userAgent, cookieHeader };
       }
     } catch (err) {}
   }
 
-  return { title: 'YouTube Video', author: '', tracks: [], userAgent: INNERTUBE_CLIENTS[0].userAgent };
+  if (pageTracks && pageTracks.length > 0) {
+    return {
+      title: pageTitle,
+      author: pageAuthor,
+      tracks: pageTracks,
+      userAgent: INNERTUBE_CLIENTS[0].userAgent,
+      cookieHeader
+    };
+  }
+
+  return { title: pageTitle, author: pageAuthor, tracks: [], userAgent: INNERTUBE_CLIENTS[0].userAgent, cookieHeader };
 }
 
-async function fetchTranscriptFromUrl(baseUrl, userAgent) {
+async function fetchTranscriptFromUrl(baseUrl, userAgent, cookieHeader) {
   const res = await fetchUrl(baseUrl, {
-    headers: { 'User-Agent': userAgent || INNERTUBE_CLIENTS[0].userAgent }
+    headers: {
+      'User-Agent': userAgent || INNERTUBE_CLIENTS[0].userAgent,
+      ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
+    }
   });
 
   const raw = res.data || '';
   if (!raw.trim()) {
-    throw new Error('ไม่พบเนื้อหาซับไตเติ้ล');
+    throw new Error('YouTube ส่งข้อมูลซับว่างเปล่ากลับมา');
   }
 
   const rawLines = [];
@@ -269,7 +360,6 @@ exports.handler = async (event) => {
   const pathStr = event.path || '';
   const params = event.queryStringParameters || {};
 
-  // Search endpoint: /api/search
   if (pathStr.endsWith('/search')) {
     const q = (params.q || '').trim();
     if (!q) {
@@ -283,7 +373,6 @@ exports.handler = async (event) => {
     }
   }
 
-  // Transcript endpoint: /api/transcript
   if (pathStr.endsWith('/transcript')) {
     const videoInput = params.v || '';
     const preferredLang = params.lang || '';
@@ -294,15 +383,14 @@ exports.handler = async (event) => {
     }
 
     try {
-      const { title, author, tracks, userAgent } = await getYouTubeCaptionTracks(videoId);
-      const manualTracks = (tracks || []).filter(t => t.kind !== 'asr');
+      const { title, author, tracks, userAgent, cookieHeader } = await getYouTubeCaptionTracks(videoId);
 
-      if (manualTracks.length === 0) {
+      if (!tracks || tracks.length === 0) {
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({
-            error: 'คลิปนี้ไม่มีซับแท้ (Manual CC) บน YouTube กรุณาค้นหาหรือเลือกคลิปที่มีซับแท้',
+            error: 'คลิปนี้ไม่มีซับไตเติ้ลบน YouTube กรุณาเลือกคลิปอื่น',
             videoId,
             title,
             author,
@@ -311,30 +399,40 @@ exports.handler = async (event) => {
         };
       }
 
-      const availableTracks = manualTracks.map(t => ({
+      // Prioritize manual CC tracks first, but keep all available tracks so videos never fail to load
+      const availableTracks = tracks.map(t => ({
         languageCode: t.languageCode,
         vssId: t.vssId,
-        name: t.name?.simpleText || t.name?.runs?.[0]?.text || t.languageCode
+        name: t.name?.simpleText || t.name?.runs?.[0]?.text || t.languageCode,
+        isAuto: t.kind === 'asr'
       }));
 
       availableTracks.sort((a, b) => {
-        const score = (code) => code.startsWith('th') ? 0 : code.startsWith('en') ? 1 : 2;
-        return score(a.languageCode) - score(b.languageCode);
+        const score = (tr) => {
+          let s = tr.languageCode.startsWith('th') ? 0 : tr.languageCode.startsWith('en') ? 2 : 4;
+          if (tr.isAuto) s += 1;
+          return s;
+        };
+        return score(a) - score(b);
       });
 
       let selectedTrack = null;
       if (preferredLang) {
-        selectedTrack = manualTracks.find(t => t.vssId === preferredLang) ||
-                        manualTracks.find(t => t.languageCode === preferredLang) ||
-                        manualTracks.find(t => t.languageCode.startsWith(preferredLang));
+        selectedTrack = tracks.find(t => t.vssId === preferredLang) ||
+                        tracks.find(t => t.languageCode === preferredLang && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode.startsWith(preferredLang) && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode === preferredLang) ||
+                        tracks.find(t => t.languageCode.startsWith(preferredLang));
       }
       if (!selectedTrack) {
-        selectedTrack = manualTracks.find(t => t.languageCode.startsWith('th')) ||
-                        manualTracks.find(t => t.languageCode.startsWith('en')) ||
-                        manualTracks[0];
+        selectedTrack = tracks.find(t => t.languageCode.startsWith('th') && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode.startsWith('en') && t.kind !== 'asr') ||
+                        tracks.find(t => t.languageCode.startsWith('th')) ||
+                        tracks.find(t => t.languageCode.startsWith('en')) ||
+                        tracks[0];
       }
 
-      const lines = await fetchTranscriptFromUrl(selectedTrack.baseUrl, userAgent);
+      const lines = await fetchTranscriptFromUrl(selectedTrack.baseUrl, userAgent, cookieHeader);
 
       return {
         statusCode: 200,
