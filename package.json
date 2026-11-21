@@ -1,0 +1,9 @@
+{
+  "name": "youtube-typeracer",
+  "version": "1.0.0",
+  "description": "YouTube Subtitle Typing Practice Game (TH/EN)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

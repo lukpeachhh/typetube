@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>typetube</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PeerJS for 100% Serverless WebRTC Multiplayer on GitHub Pages -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      background-color: #fafafa;
+      color: #111827;
+      font-family: 'Inter', 'Sarabun', sans-serif;
+      overflow-x: hidden;
+    }
+
+    .typing-line {
+      font-family: 'Sarabun', 'Inter', sans-serif;
+      letter-spacing: 0.01em;
+      line-height: 1.85;
+      text-rendering: optimizeLegibility;
+    }
+
+    .t-cluster {
+      display: inline;
+      position: relative;
+      border-radius: 4px;
+      padding: 2px 0;
+      transition: color 0.05s ease, background-color 0.05s ease;
+    }
+
+    .t-space {
+      display: inline-block;
+      min-width: 0.45em;
+    }
+
+    .t-pending {
+      color: #cbd5e1;
+    }
+
+    .t-correct {
+      color: #111827;
+    }
+
+    .t-partial,
+    .t-active {
+      color: #2563eb;
+      background-color: rgba(37, 99, 235, 0.1);
+      border-bottom: 2px solid #2563eb;
+    }
+
+    .t-wrong {
+      color: #ef4444;
+      background-color: rgba(239, 68, 68, 0.12);
+      border-bottom: 2px solid #ef4444;
+    }
+
+    /* Clean Minimal Virtual Keyboard */
+    .kb-wrapper {
+      user-select: none;
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .kb-row {
+      display: flex;
+      justify-content: center;
+      gap: 5px;
+      margin-bottom: 5px;
+    }
+    .kb-key {
+      background-color: #ffffff;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 0 #e2e8f0;
+      border-radius: 8px;
+      height: 40px;
+      min-width: 42px;
+      padding: 3px 5px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 500;
+      color: #334155;
+      transition: all 0.06s ease;
+    }
+    .kb-key .sub-char {
+      font-size: 9px;
+      color: #94a3b8;
+      align-self: flex-start;
+      line-height: 1;
+    }
+    .kb-key .main-char {
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    .kb-key.active-target {
+      background-color: #2563eb !important;
+      border-color: #2563eb !important;
+      color: #ffffff !important;
+      box-shadow: 0 1px 0 #1d4ed8;
+    }
+    .kb-key.active-target .sub-char {
+      color: rgba(255, 255, 255, 0.8) !important;
+    }
+    .kb-space {
+      width: 240px;
+    }
+    .kb-shift {
+      width: 80px;
+      font-size: 11px;
+      justify-content: center;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between">
+
+  <input
+    id="hiddenTypingInput"
+    type="text"
+    autocomplete="off"
+    autocorrect="off"
+    autocapitalize="off"
+    spellcheck="false"
+    class="sr-only"
+  />
+
+  <!-- Ultra-Clean 3-Column Header -->
+  <header class="w-full max-w-5xl mx-auto px-6 pt-5 pb-2 grid grid-cols-3 items-center">
+    <!-- Left: Brand -->
+    <div class="flex items-center gap-3">
+      <span class="font-semibold tracking-tight text-base text-slate-900">typetube</span>
+    </div>
+
+    <!-- Center: Search Clip Button -->
+    <div class="flex justify-center">
+      <button
+        id="openSourceModalBtn"
+        class="px-5 py-2 rounded-full bg-white border border-slate-200 hover:border-slate-300 text-slate-600 hover:text-slate-900 text-xs font-medium transition cursor-pointer shadow-2xs flex items-center gap-2 min-w-[220px] justify-center"
+      >
+        <span>ค้นหาคลิป YouTube...</span>
+      </button>
+    </div>
+
+    <!-- Right: Multiplayer Room, Language, Keyboard -->
+    <div class="flex items-center justify-end gap-2 text-xs">
+      <button
+        id="openRoomModalBtn"
+        class="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium transition cursor-pointer shadow-2xs"
+      >
+        แข่งกับเพื่อน
+      </button>
+
+      <select id="langSelect" class="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-700 font-medium outline-none cursor-pointer shadow-2xs">
+        <option value="th">TH</option>
+        <option value="en">EN</option>
+      </select>
+
+      <button id="toggleKeyboardBtn" class="px-3 py-1.5 rounded-xl bg-white border border-slate-200 hover:border-slate-300 text-slate-700 font-medium transition cursor-pointer shadow-2xs">
+        คีย์บอร์ด
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main id="typingStage" class="flex-1 w-full max-w-4xl mx-auto px-6 flex flex-col justify-center items-center gap-5 py-4 cursor-text">
+
+    <!-- Live Multiplayer Race Bar (Hidden when playing solo) -->
+    <div id="multiplayerBar" class="hidden w-full max-w-3xl bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
+      <div class="flex items-center justify-between text-xs mb-2.5">
+        <div class="flex items-center gap-2">
+          <span class="font-semibold text-slate-800">ห้องแข่ง: <span id="roomCodeDisplay" class="font-mono text-blue-600">----</span></span>
+          <button id="copyRoomLinkBtn" class="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] transition cursor-pointer">
+            คัดลอกลิงก์ชวนเพื่อน
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="startRaceBtn" class="hidden px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs transition cursor-pointer">
+            เริ่มแข่งพร้อมกัน
+          </button>
+          <button id="leaveRoomBtn" class="text-slate-400 hover:text-slate-600 text-xs cursor-pointer">
+            ออกจากห้อง
+          </button>
+        </div>
+      </div>
+      <!-- Players Progress List -->
+      <div id="playersProgressList" class="space-y-2 text-xs"></div>
+    </div>
+
+    <!-- Large Widescreen Video Player (Hidden until user selects a clip) -->
+    <div id="videoSection" class="hidden w-full max-w-3xl flex flex-col gap-3">
+      <div class="w-full aspect-video rounded-2xl overflow-hidden bg-black shadow-sm border border-slate-200 relative">
+        <div id="ytPlayer"></div>
+        <!-- Countdown Overlay for Multiplayer -->
+        <div id="countdownOverlay" class="hidden absolute inset-0 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center">
+          <span id="countdownText" class="text-6xl font-bold text-white font-mono">3</span>
+        </div>
+      </div>
+
+      <!-- Minimal Single Control Bar -->
+      <div class="flex items-center justify-between gap-4 px-1 text-xs text-slate-500">
+        <div class="flex items-center gap-2.5 min-w-0 flex-1">
+          <span id="timestampPill" class="font-mono text-slate-400 shrink-0">00:00</span>
+          <h2 id="videoTitle" class="font-medium text-slate-700 truncate"></h2>
+        </div>
+
+        <div class="flex items-center gap-5 shrink-0">
+          <div class="flex items-center gap-4 font-mono text-slate-400 select-none">
+            <span><strong id="statWpm" class="text-slate-800 font-semibold">0</strong> wpm</span>
+            <span><strong id="statAcc" class="text-slate-800 font-semibold">100%</strong></span>
+            <span id="statProgress" class="text-slate-400">0/0</span>
+          </div>
+
+          <div class="flex items-center gap-1">
+            <button id="prevLineBtn" class="px-2 py-1 rounded-lg hover:bg-slate-200/60 text-slate-600 transition cursor-pointer">ก่อนหน้า</button>
+            <button id="replayBtn" class="px-2 py-1 rounded-lg hover:bg-slate-200/60 text-slate-600 transition cursor-pointer">ฟังซ้ำ</button>
+            <button id="nextLineBtn" class="px-2 py-1 rounded-lg hover:bg-slate-200/60 text-slate-600 transition cursor-pointer">ถัดไป</button>
+            <button id="finishBtn" class="px-2.5 py-1 rounded-lg bg-slate-200/70 hover:bg-slate-300/70 text-slate-700 font-medium transition cursor-pointer ml-1">จบเกม</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Clean Typing Sentence -->
+    <div class="w-full max-w-3xl text-center px-2 py-2">
+      <div
+        id="targetTextDisplay"
+        class="typing-line text-2xl sm:text-3xl font-medium select-none break-words min-h-[2.75rem] text-center text-slate-400"
+      >
+        กดค้นหาคลิป YouTube ด้านบนเพื่อเริ่มเล่น
+      </div>
+      <div id="nextLinePreview" class="mt-2.5 text-sm text-slate-400 truncate max-w-xl mx-auto"></div>
+    </div>
+
+    <!-- Virtual Keyboard -->
+    <div id="keyboardContainer" class="kb-wrapper">
+      <div id="keyboardRows"></div>
+    </div>
+
+  </main>
+
+  <!-- Minimal Footer -->
+  <footer class="w-full max-w-5xl mx-auto px-6 py-4 flex items-center justify-between text-[11px] text-slate-400">
+    <div class="flex items-center gap-4">
+      <span>Tab ฟังซ้ำ</span>
+      <span>Enter ข้ามประโยค</span>
+    </div>
+    <div>
+      <span>Official YouTube Embed • ไม่มีการเก็บข้อมูลผู้ใช้</span>
+    </div>
+  </footer>
+
+  <!-- Clip Selector / Search Modal -->
+  <div id="sourceModal" class="hidden fixed inset-0 z-50 bg-slate-900/30 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="bg-white border border-slate-200 rounded-2xl max-w-xl w-full p-5 shadow-xl max-h-[82vh] flex flex-col">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-sm text-slate-800">เลือกคลิปฝึกพิมพ์ (ซับแท้ TH / EN)</h3>
+        <button id="closeSourceModalBtn" class="text-slate-400 hover:text-slate-600 text-lg leading-none cursor-pointer">&times;</button>
+      </div>
+
+      <!-- Search Filter Input -->
+      <div class="mb-3">
+        <div class="flex gap-2">
+          <input
+            id="ytSearchInput"
+            type="text"
+            placeholder="ค้นหาชื่อคลิป หรือวางลิงก์ YouTube..."
+            class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-blue-500"
+          />
+          <button id="searchVideoBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition cursor-pointer shrink-0">
+            ค้นหา
+          </button>
+        </div>
+        <p id="modalErrorMsg" class="hidden text-xs text-red-500 mt-2"></p>
+      </div>
+
+      <div id="searchResultsContainer" class="flex-1 overflow-y-auto min-h-[180px] max-h-[380px] space-y-1.5 pr-1 pt-2 border-t border-slate-100"></div>
+    </div>
+  </div>
+
+  <!-- Multiplayer Room Modal (WebRTC Peer-to-Peer) -->
+  <div id="roomModal" class="hidden fixed inset-0 z-50 bg-slate-900/30 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="bg-white border border-slate-200 rounded-2xl max-w-sm w-full p-6 shadow-xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold text-sm text-slate-800">เล่นแข่งกับเพื่อนสดๆ (P2P)</h3>
+        <button id="closeRoomModalBtn" class="text-slate-400 hover:text-slate-600 text-lg leading-none cursor-pointer">&times;</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-500 mb-1">ชื่อเล่นของคุณ</label>
+          <input
+            id="playerNameInput"
+            type="text"
+            maxlength="16"
+            placeholder="เช่น Peach"
+            class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div class="pt-2">
+          <button id="createRoomBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-xl transition cursor-pointer">
+            สร้างห้องใหม่ (เป็นหัวหน้าห้อง)
+          </button>
+        </div>
+
+        <div class="relative flex py-1 items-center">
+          <div class="flex-grow border-t border-slate-200"></div>
+          <span class="flex-shrink mx-3 text-slate-400 text-[11px]">หรือเข้าห้องเพื่อน</span>
+          <div class="flex-grow border-t border-slate-200"></div>
+        </div>
+
+        <div class="flex gap-2">
+          <input
+            id="joinRoomCodeInput"
+            type="text"
+            placeholder="ใส่รหัสห้อง 5 ตัว..."
+            class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-mono uppercase outline-none focus:border-blue-500"
+          />
+          <button id="joinRoomBtn" class="bg-slate-800 hover:bg-slate-900 text-white font-medium px-4 py-2 rounded-xl transition cursor-pointer">
+            เข้าห้อง
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- End-of-Game Score & Multiplayer Leaderboard Modal (Stateless) -->
+  <div id="scoreModal" class="hidden fixed inset-0 z-50 bg-slate-900/30 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-7 shadow-2xl text-center">
+      <div class="text-xs uppercase tracking-widest text-slate-400 font-medium">สรุปผลคะแนน</div>
+      <div id="resultClipTitle" class="text-xs text-slate-500 truncate mt-1 mb-5"></div>
+
+      <!-- Rank Badge & Total Score -->
+      <div class="flex flex-col items-center justify-center my-2">
+        <div id="resultRank" class="w-20 h-20 rounded-2xl bg-blue-50 text-blue-600 border border-blue-200 flex items-center justify-center text-4xl font-bold font-mono shadow-2xs">
+          S
+        </div>
+        <div id="resultComment" class="text-sm font-semibold text-slate-800 mt-3">ยอดเยี่ยมมาก</div>
+        <div class="text-xs text-slate-400 mt-0.5">คะแนนรวม <strong id="resultScore" class="text-slate-700 font-mono">0</strong> คะแนน</div>
+      </div>
+
+      <!-- Detailed Metrics Grid -->
+      <div class="grid grid-cols-3 gap-2.5 my-5">
+        <div class="bg-slate-50 border border-slate-100 rounded-2xl p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">ความเร็ว</div>
+          <div class="text-xl font-bold text-slate-800 font-mono mt-0.5"><span id="resultWpm">0</span></div>
+          <div class="text-[10px] text-slate-400">WPM</div>
+        </div>
+        <div class="bg-slate-50 border border-slate-100 rounded-2xl p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">ความแม่นยำ</div>
+          <div class="text-xl font-bold text-slate-800 font-mono mt-0.5"><span id="resultAcc">100%</span></div>
+          <div class="text-[10px] text-slate-400">Accuracy</div>
+        </div>
+        <div class="bg-slate-50 border border-slate-100 rounded-2xl p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">เวลาที่ใช้</div>
+          <div class="text-xl font-bold text-slate-800 font-mono mt-0.5"><span id="resultTime">00:00</span></div>
+          <div class="text-[10px] text-slate-400">นาที:วินาที</div>
+        </div>
+      </div>
+
+      <!-- Multiplayer Final Standings (Visible when in a room) -->
+      <div id="multiplayerFinalBoard" class="hidden mb-5 text-left bg-slate-50 border border-slate-100 rounded-2xl p-3.5">
+        <div class="text-[11px] font-semibold text-slate-500 mb-2">อันดับคะแนนในห้องแข่ง</div>
+        <div id="multiplayerFinalList" class="space-y-1.5 text-xs"></div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="flex items-center gap-2.5">
+        <button id="playAgainBtn" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-xl text-xs transition cursor-pointer">
+          เล่นอีกครั้ง
+        </button>
+        <button id="shareResultBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-xl text-xs transition cursor-pointer">
+          คัดลอกคะแนน
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 hidden bg-slate-900 text-white px-4 py-2 rounded-full shadow-md text-xs font-medium"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
