@@ -31,7 +31,6 @@ function fetchUrl(urlStr, options = {}) {
       method: options.method || 'GET',
       headers: {
         'Accept-Language': 'th,en-US;q=0.9,en;q=0.8',
-        'Cookie': 'CONSENT=YES+cb; SOCS=CAI',
         ...(options.headers || {})
       }
     };
@@ -81,7 +80,6 @@ function cleanSubtitleText(text) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Merge overly fragmented Thai spacing if needed
   const thaiChars = (out.match(/[\u0E00-\u0E7F]/g) || []).length;
   if (thaiChars > 5) {
     const parts = out.split(' ');
@@ -128,9 +126,14 @@ const INNERTUBE_CLIENTS = [
     userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
   },
   {
-    clientName: 'WEB',
-    clientVersion: '2.20250312.04.00',
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    clientName: 'ANDROID_VR',
+    clientVersion: '1.60.19',
+    deviceMake: 'Oculus',
+    deviceModel: 'Quest 3',
+    osName: 'Android',
+    osVersion: '12L',
+    androidSdkVersion: 32,
+    userAgent: 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip'
   }
 ];
 
@@ -139,7 +142,7 @@ async function searchYouTubeVideos(query) {
     context: {
       client: {
         clientName: 'WEB',
-        clientVersion: '2.20250312.04.00',
+        clientVersion: '2.20261119.01.00',
         hl: 'th',
         gl: 'TH'
       }
@@ -187,37 +190,10 @@ async function searchYouTubeVideos(query) {
   return results;
 }
 
-// Fetch visitorData & session cookies from YouTube watch page so cloud IPs (Netlify/AWS) work reliably
 async function getYouTubeCaptionTracks(videoId) {
-  let visitorData = undefined;
-  let cookieHeader = 'CONSENT=YES+cb; SOCS=CAI';
-  let pageTracks = null;
-  let pageTitle = 'YouTube Video';
-  let pageAuthor = '';
+  let lastStatus = '';
 
-  try {
-    const pageRes = await fetchUrl(`https://www.youtube.com/watch?v=${videoId}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Cookie': cookieHeader
-      }
-    });
-    const setCookies = (pageRes.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
-    if (setCookies) {
-      cookieHeader = `${cookieHeader}; ${setCookies}`;
-    }
-    const vMatch = pageRes.data.match(/"VISITOR_DATA":"([^"]+)"/);
-    if (vMatch) visitorData = vMatch[1];
-
-    const prMatch = pageRes.data.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|window|<\/script>)/);
-    if (prMatch) {
-      const pr = JSON.parse(prMatch[1]);
-      pageTracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      pageTitle = pr?.videoDetails?.title || pageTitle;
-      pageAuthor = pr?.videoDetails?.author || pageAuthor;
-    }
-  } catch (e) {}
-
+  // 1. Try clean mobile/VR Innertube clients directly WITHOUT desktop web cookies
   for (const client of INNERTUBE_CLIENTS) {
     try {
       const body = JSON.stringify({
@@ -231,8 +207,7 @@ async function getYouTubeCaptionTracks(videoId) {
             osVersion: client.osVersion,
             androidSdkVersion: client.androidSdkVersion,
             hl: 'th',
-            gl: 'TH',
-            visitorData
+            gl: 'TH'
           }
         },
         videoId: videoId
@@ -242,48 +217,56 @@ async function getYouTubeCaptionTracks(videoId) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': client.userAgent,
-          'Cookie': cookieHeader,
-          ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {})
+          'User-Agent': client.userAgent
         },
         body
       });
 
       const json = JSON.parse(res.data);
+      lastStatus = json?.playabilityStatus?.status || '';
       const tracks = json?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      const title = json?.videoDetails?.title || pageTitle;
-      const author = json?.videoDetails?.author || pageAuthor;
+      const title = json?.videoDetails?.title || 'YouTube Video';
+      const author = json?.videoDetails?.author || '';
 
       if (tracks && tracks.length > 0) {
-        return { title, author, tracks, userAgent: client.userAgent, cookieHeader };
+        return { title, author, tracks, userAgent: client.userAgent, lastStatus };
       }
     } catch (err) {}
   }
 
-  if (pageTracks && pageTracks.length > 0) {
-    return {
-      title: pageTitle,
-      author: pageAuthor,
-      tracks: pageTracks,
-      userAgent: INNERTUBE_CLIENTS[0].userAgent,
-      cookieHeader
-    };
-  }
+  // 2. Fallback: Fetch via Google Translate Proxy (uses Google IPs, bypassing AWS IP block on watch page!)
+  try {
+    const gtUrl = `https://www-youtube-com.translate.goog/watch?v=${videoId}&_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en`;
+    const gtRes = await fetchUrl(gtUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      }
+    });
+    const prMatch = gtRes.data.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|window|<\/script>)/);
+    if (prMatch) {
+      const pr = JSON.parse(prMatch[1]);
+      const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      const title = pr?.videoDetails?.title || 'YouTube Video';
+      const author = pr?.videoDetails?.author || '';
+      if (tracks && tracks.length > 0) {
+        return { title, author, tracks, userAgent: INNERTUBE_CLIENTS[0].userAgent, lastStatus: 'GTRANSLATE_OK' };
+      }
+    }
+  } catch (e) {}
 
-  return { title: pageTitle, author: pageAuthor, tracks: [], userAgent: INNERTUBE_CLIENTS[0].userAgent, cookieHeader };
+  return { title: 'YouTube Video', author: '', tracks: [], userAgent: INNERTUBE_CLIENTS[0].userAgent, lastStatus };
 }
 
-async function fetchTranscriptFromUrl(baseUrl, userAgent, cookieHeader) {
-  const res = await fetchUrl(baseUrl, {
-    headers: {
-      'User-Agent': userAgent || INNERTUBE_CLIENTS[0].userAgent,
-      ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
-    }
+async function fetchTranscriptFromUrl(baseUrl, userAgent) {
+  // Remove `&exp=xpe` if present so YouTube doesn't return 0-byte response
+  const cleanedUrl = baseUrl.replace(/&exp=xpe/g, '');
+  const res = await fetchUrl(cleanedUrl, {
+    headers: { 'User-Agent': userAgent || INNERTUBE_CLIENTS[0].userAgent }
   });
 
   const raw = res.data || '';
   if (!raw.trim()) {
-    throw new Error('YouTube ส่งข้อมูลซับว่างเปล่ากลับมา');
+    throw new Error('YouTube บล็อกการดึงเนื้อหาซับจากเซิร์ฟเวอร์คลาวด์ (Empty timedtext)');
   }
 
   const rawLines = [];
@@ -383,14 +366,16 @@ exports.handler = async (event) => {
     }
 
     try {
-      const { title, author, tracks, userAgent, cookieHeader } = await getYouTubeCaptionTracks(videoId);
+      const { title, author, tracks, userAgent, lastStatus } = await getYouTubeCaptionTracks(videoId);
 
       if (!tracks || tracks.length === 0) {
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({
-            error: 'คลิปนี้ไม่มีซับไตเติ้ลบน YouTube กรุณาเลือกคลิปอื่น',
+            error: lastStatus === 'LOGIN_REQUIRED'
+              ? 'YouTube บล็อก IP ของเซิร์ฟเวอร์ Netlify (LOGIN_REQUIRED)'
+              : `คลิปนี้ไม่มีซับไตเติ้ลบน YouTube (${lastStatus || 'NO_TRACKS'})`,
             videoId,
             title,
             author,
@@ -399,7 +384,6 @@ exports.handler = async (event) => {
         };
       }
 
-      // Prioritize manual CC tracks first, but keep all available tracks so videos never fail to load
       const availableTracks = tracks.map(t => ({
         languageCode: t.languageCode,
         vssId: t.vssId,
@@ -432,7 +416,7 @@ exports.handler = async (event) => {
                         tracks[0];
       }
 
-      const lines = await fetchTranscriptFromUrl(selectedTrack.baseUrl, userAgent, cookieHeader);
+      const lines = await fetchTranscriptFromUrl(selectedTrack.baseUrl, userAgent);
 
       return {
         statusCode: 200,
