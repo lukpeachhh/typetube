@@ -174,11 +174,14 @@
 
     <!-- Live Multiplayer Race Bar (Hidden when playing solo) -->
     <div id="multiplayerBar" class="hidden w-full max-w-3xl bg-white border border-slate-200 rounded-2xl p-3.5 shadow-2xs">
-      <div class="flex items-center justify-between text-xs mb-2.5">
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs mb-2.5">
         <div class="flex items-center gap-2">
           <span class="font-semibold text-slate-800">ห้องแข่ง: <span id="roomCodeDisplay" class="font-mono text-blue-600">----</span></span>
           <button id="copyRoomLinkBtn" class="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] transition cursor-pointer">
             คัดลอกลิงก์ชวนเพื่อน
+          </button>
+          <button id="changeNameBtn" class="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] transition cursor-pointer">
+            เปลี่ยนชื่อ
           </button>
         </div>
         <div class="flex items-center gap-2">
@@ -375,7 +378,7 @@
       <!-- Action Buttons -->
       <div class="flex items-center gap-2.5">
         <button id="playAgainBtn" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-xl text-xs transition cursor-pointer">
-          เล่นอีกครั้ง
+          หาเพลงใหม่ / เลือกคลิปใหม่
         </button>
         <button id="shareResultBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-xl text-xs transition cursor-pointer">
           คัดลอกคะแนน

@@ -11,12 +11,15 @@ let currentLang = 'th';
 let transcriptLines = [];
 let currentLineIndex = 0;
 let waitingForTypingToFinish = false;
+let isGameFinished = false;
 let showKeyboard = true;
 
-// Stats (In-memory only, never persisted)
+// Stats (Calculated purely from correct characters typed)
 let startTime = null;
-let totalTypedChars = 0;
-let totalCorrectChars = 0;
+let completedLinesChars = 0; // Total characters in completed lines
+let completedCorrectChars = 0; // Total correct characters in completed lines
+let currentLineCorrectChars = 0; // Correct characters in current active line
+let currentLineTypedChars = 0; // Typed characters in current active line
 
 // Multiplayer WebRTC (PeerJS) State
 let peer = null;
@@ -75,6 +78,7 @@ const joinRoomBtn = document.getElementById('joinRoomBtn');
 const multiplayerBar = document.getElementById('multiplayerBar');
 const roomCodeDisplay = document.getElementById('roomCodeDisplay');
 const copyRoomLinkBtn = document.getElementById('copyRoomLinkBtn');
+const changeNameBtn = document.getElementById('changeNameBtn');
 const startRaceBtn = document.getElementById('startRaceBtn');
 const leaveRoomBtn = document.getElementById('leaveRoomBtn');
 const playersProgressList = document.getElementById('playersProgressList');
@@ -298,13 +302,14 @@ window.onYouTubeIframeAPIReady = function () {
       rel: 0,
       modestbranding: 1,
       controls: 1,
+      autoplay: 0,
       cc_load_policy: 0
     },
     events: {
       onReady: () => {
         isPlayerReady = true;
         if (currentVideoId) {
-          player.loadVideoById(currentVideoId);
+          player.cueVideoById(currentVideoId);
         }
         startSyncLoop();
       }
@@ -316,13 +321,21 @@ function startSyncLoop() {
   if (syncTimer) clearInterval(syncTimer);
   syncTimer = setInterval(() => {
     if (!isPlayerReady || !player || typeof player.getCurrentTime !== 'function') return;
-    if (!transcriptLines.length) return;
+    const playerState = player.getPlayerState();
 
+    // Never allow video to play automatically after game/race is finished!
+    if (isGameFinished) {
+      if (playerState === YT.PlayerState.PLAYING || playerState === YT.PlayerState.BUFFERING) {
+        player.pauseVideo();
+      }
+      return;
+    }
+
+    if (!transcriptLines.length) return;
     const line = transcriptLines[currentLineIndex];
     if (!line) return;
 
     const currentTime = player.getCurrentTime();
-    const playerState = player.getPlayerState();
 
     if (playerState === YT.PlayerState.PLAYING && currentTime >= line.end - 0.08) {
       player.pauseVideo();
@@ -332,48 +345,65 @@ function startSyncLoop() {
 }
 
 // ============================================================================
-// SCORE & GRADE CALCULATION (STATELESS)
+// SCORE & ACCURACY CALCULATION (Calculated strictly from correct characters)
 // ============================================================================
+function countCorrectCharsInLine(target, typed) {
+  let correct = 0;
+  const len = Math.min(target.length, typed.length);
+  for (let i = 0; i < len; i++) {
+    if (typed[i] === target[i]) correct++;
+  }
+  return correct;
+}
+
 function getCurrentMetrics() {
+  const totalCorrect = completedCorrectChars + currentLineCorrectChars;
+  const totalEvaluated = completedLinesChars + currentLineTypedChars;
+  const totalClipChars = transcriptLines.reduce((sum, l) => sum + l.text.length, 0) || 1;
+
   let wpm = 0;
   let elapsedSeconds = 0;
-  if (startTime && totalCorrectChars > 0) {
+  if (startTime && totalCorrect > 0) {
     elapsedSeconds = Math.max(1, Math.round((Date.now() - startTime) / 1000));
     const elapsedMinutes = Math.max((Date.now() - startTime) / 60000, 0.02);
-    wpm = Math.round((totalCorrectChars / 5) / elapsedMinutes);
+    wpm = Math.round((totalCorrect / 5) / elapsedMinutes);
   }
-  const acc = totalTypedChars > 0
-    ? Math.max(0, Math.min(100, Math.round((totalCorrectChars / totalTypedChars) * 100)))
+
+  // Accuracy is strictly based on how many characters match the target text
+  const acc = totalEvaluated > 0
+    ? Math.max(0, Math.min(100, Math.round((totalCorrect / totalEvaluated) * 100)))
     : 100;
 
-  const score = Math.round(wpm * (acc / 100) * 15 + totalCorrectChars * 2);
-  const progressPct = transcriptLines.length > 0
-    ? Math.min(100, Math.round(((currentLineIndex + (hiddenInput.value.length / Math.max(1, (transcriptLines[currentLineIndex]?.text.length || 1)))) / transcriptLines.length) * 100))
-    : 0;
+  // Score & Progress are strictly based on correct characters matched against the clip!
+  const score = totalCorrect * 10;
+  const progressPct = Math.min(100, Math.round((totalCorrect / totalClipChars) * 100));
 
   let rank = 'C';
-  let comment = 'เริ่มต้นได้ดี ลองฝึกเพิ่มความเร็วอีกนิด';
+  let comment = 'เริ่มต้นได้ดี ลองฝึกพิมพ์ให้แม่นขึ้นอีกนิด';
   let rankStyle = 'bg-slate-100 text-slate-700 border-slate-200';
 
-  if (wpm >= 65 && acc >= 96) {
+  if (acc >= 96 && progressPct >= 90) {
     rank = 'S';
-    comment = 'ระดับเทพ เร็วและแม่นยำไร้ที่ติ';
+    comment = 'แม่นยำไร้ที่ติ พิมพ์ถูกครบทุกคำ';
     rankStyle = 'bg-blue-50 text-blue-600 border-blue-200';
-  } else if (wpm >= 45 && acc >= 92) {
+  } else if (acc >= 90 && progressPct >= 75) {
     rank = 'A';
-    comment = 'ยอดเยี่ยมมาก พิมพ์คล่องและแม่นยำ';
+    comment = 'ยอดเยี่ยมมาก พิมพ์ถูกต้องและแม่นยำ';
     rankStyle = 'bg-emerald-50 text-emerald-600 border-emerald-200';
-  } else if (wpm >= 28 && acc >= 85) {
+  } else if (acc >= 80 && progressPct >= 50) {
     rank = 'B';
-    comment = 'ทำได้ดีมาก จังหวะการพิมพ์กำลังดี';
+    comment = 'ทำได้ดีมาก พิมพ์ถูกเป็นส่วนใหญ่';
     rankStyle = 'bg-amber-50 text-amber-600 border-amber-200';
   }
 
-  return { wpm, acc, elapsedSeconds, score, rank, comment, rankStyle, progressPct };
+  return { wpm, acc, elapsedSeconds, score, rank, comment, rankStyle, progressPct, totalCorrect };
 }
 
 function showScoreSummary() {
   if (!transcriptLines.length) return;
+
+  // Lock video playback so it NEVER plays on its own when the race finishes
+  isGameFinished = true;
   if (isPlayerReady && player && player.pauseVideo) {
     player.pauseVideo();
   }
@@ -389,7 +419,7 @@ function showScoreSummary() {
   resultTime.textContent = formatTime(m.elapsedSeconds);
 
   if (currentRoomCode) {
-    syncMyProgressToRoom(true);
+    syncMyProgressToRoom();
     renderMultiplayerFinalStandings();
   } else {
     multiplayerFinalBoard.classList.add('hidden');
@@ -494,6 +524,35 @@ function joinMultiplayerRoom(codeInput) {
   });
 }
 
+// Allow any player (Host or Friend) to change their nickname at any time
+function promptChangePlayerName() {
+  const newName = prompt('ตั้งชื่อเล่นใหม่ของคุณ:', myPlayerName);
+  if (!newName || !newName.trim()) return;
+  myPlayerName = newName.trim().slice(0, 16);
+  playerNameInput.value = myPlayerName;
+
+  if (!currentRoomCode) return;
+
+  if (isRoomHost) {
+    if (roomPlayers[myPeerId]) {
+      roomPlayers[myPeerId].name = myPlayerName;
+    }
+    broadcastRoomState();
+    renderMultiplayerProgressUI();
+    if (!scoreModal.classList.contains('hidden')) {
+      renderMultiplayerFinalStandings();
+    }
+  } else if (hostConn && hostConn.open) {
+    hostConn.send({
+      type: 'RENAME',
+      peerId: myPeerId,
+      name: myPlayerName
+    });
+  }
+  showToast(`เปลี่ยนชื่อเป็น "${myPlayerName}" แล้ว`);
+  focusTyping();
+}
+
 function handlePeerMessage(conn, msg) {
   if (!msg || !msg.type) return;
 
@@ -518,6 +577,15 @@ function handlePeerMessage(conn, msg) {
       }
       broadcastRoomState();
       renderMultiplayerProgressUI();
+    } else if (msg.type === 'RENAME') {
+      if (roomPlayers[msg.peerId] && msg.name) {
+        roomPlayers[msg.peerId].name = String(msg.name).trim().slice(0, 16);
+        broadcastRoomState();
+        renderMultiplayerProgressUI();
+        if (!scoreModal.classList.contains('hidden')) {
+          renderMultiplayerFinalStandings();
+        }
+      }
     } else if (msg.type === 'PROGRESS') {
       if (roomPlayers[msg.peerId]) {
         roomPlayers[msg.peerId] = {
@@ -545,12 +613,12 @@ function handlePeerMessage(conn, msg) {
       videoSection.classList.remove('hidden');
       targetTextDisplay.classList.remove('text-slate-400');
 
-      if (isPlayerReady && player && player.loadVideoById) {
-        player.loadVideoById(currentVideoId);
-        player.pauseVideo();
+      // Cue video paused so it does NOT auto-play before the race starts
+      if (isPlayerReady && player && player.cueVideoById) {
+        player.cueVideoById(currentVideoId);
       }
       resetStats();
-      goToLine(0, true);
+      goToLine(0, false);
     } else if (msg.type === 'ROOM_STATE') {
       roomPlayers = msg.players || {};
       renderMultiplayerProgressUI();
@@ -585,16 +653,15 @@ function broadcastClipToGuests() {
   });
 }
 
-function syncMyProgressToRoom(forceComplete = false) {
+function syncMyProgressToRoom() {
   if (!currentRoomCode) return;
   const m = getCurrentMetrics();
-  const prog = forceComplete ? 100 : m.progressPct;
 
   if (isRoomHost) {
     if (roomPlayers[myPeerId]) {
       roomPlayers[myPeerId].wpm = m.wpm;
       roomPlayers[myPeerId].acc = m.acc;
-      roomPlayers[myPeerId].progress = prog;
+      roomPlayers[myPeerId].progress = m.progressPct;
       roomPlayers[myPeerId].score = m.score;
       roomPlayers[myPeerId].rank = m.rank;
     }
@@ -606,32 +673,44 @@ function syncMyProgressToRoom(forceComplete = false) {
       peerId: myPeerId,
       wpm: m.wpm,
       acc: m.acc,
-      progress: prog,
+      progress: m.progressPct,
       score: m.score,
       rank: m.rank
     });
   }
 }
 
+// Rank players in multiplayer strictly by Accuracy / Correctness (score = correctChars * 10)
+function sortPlayersByCorrectness(entries) {
+  return entries.sort((a, b) => {
+    const scoreDiff = (b[1].score || 0) - (a[1].score || 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    return (b[1].acc || 0) - (a[1].acc || 0);
+  });
+}
+
 function renderMultiplayerProgressUI() {
   playersProgressList.innerHTML = '';
-  const list = Object.entries(roomPlayers).sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
+  const list = sortPlayersByCorrectness(Object.entries(roomPlayers));
 
   list.forEach(([pid, p]) => {
     const isMe = pid === myPeerId;
     const row = document.createElement('div');
     row.className = 'flex items-center gap-3';
     row.innerHTML = `
-      <div class="w-24 truncate font-medium ${isMe ? 'text-blue-600' : 'text-slate-700'}">
+      <div class="w-28 truncate font-medium ${isMe ? 'text-blue-600 cursor-pointer hover:underline' : 'text-slate-700'}" title="${isMe ? 'คลิกเพื่อเปลี่ยนชื่อ' : ''}">
         ${p.name}${isMe ? ' (คุณ)' : ''}
       </div>
       <div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
         <div class="h-full bg-blue-600 transition-all duration-150" style="width: ${p.progress || 0}%"></div>
       </div>
       <div class="w-28 text-right font-mono text-[11px] text-slate-500">
-        <strong class="text-slate-800">${p.wpm || 0}</strong> wpm • ${p.acc || 100}%
+        ถูก <strong class="text-slate-800">${p.progress || 0}%</strong> • ${p.acc || 100}%
       </div>
     `;
+    if (isMe) {
+      row.querySelector('div').addEventListener('click', promptChangePlayerName);
+    }
     playersProgressList.appendChild(row);
   });
 }
@@ -641,14 +720,14 @@ function renderMultiplayerFinalStandings() {
   multiplayerFinalBoard.classList.remove('hidden');
   multiplayerFinalList.innerHTML = '';
 
-  const list = Object.entries(roomPlayers).sort((a, b) => (b[1].score || 0) - (a[1].score || 0));
+  const list = sortPlayersByCorrectness(Object.entries(roomPlayers));
   list.forEach(([pid, p], idx) => {
     const isMe = pid === myPeerId;
     const item = document.createElement('div');
     item.className = `flex items-center justify-between px-2.5 py-1.5 rounded-xl ${isMe ? 'bg-blue-50/80 text-blue-700 font-semibold' : 'text-slate-700'}`;
     item.innerHTML = `
       <span>#${idx + 1} ${p.name}</span>
-      <span class="font-mono text-[11px]">Rank ${p.rank || 'C'} • ${p.wpm || 0} WPM • ${(p.score || 0).toLocaleString()} pts</span>
+      <span class="font-mono text-[11px]">แม่นยำ ${p.acc || 100}% • ถูก ${p.progress || 0}% (${(p.score || 0).toLocaleString()} pts)</span>
     `;
     multiplayerFinalList.appendChild(item);
   });
@@ -675,6 +754,7 @@ function runRaceCountdown() {
     } else {
       clearInterval(timer);
       countdownOverlay.classList.add('hidden');
+      isGameFinished = false;
       startTime = Date.now();
       goToLine(0, true);
       focusTyping();
@@ -703,7 +783,6 @@ function looksLikeYouTubeUrlOrId(input) {
   return input.includes('youtube.com/') || input.includes('youtu.be/');
 }
 
-// In-memory cache so re-loading the same clip/language uses 0 quota
 const transcriptCache = new Map();
 
 async function fetchApi(apiPath) {
@@ -812,11 +891,6 @@ function applyLoadedClip(videoId, title, selectedLang, lines, availableTracks) {
   videoSection.classList.remove('hidden');
   targetTextDisplay.classList.remove('text-slate-400');
 
-  if (isPlayerReady && player && player.loadVideoById) {
-    player.loadVideoById(currentVideoId);
-    player.pauseVideo();
-  }
-
   if (availableTracks && availableTracks.length) {
     langSelect.innerHTML = '';
     availableTracks.forEach(t => {
@@ -842,7 +916,12 @@ function applyLoadedClip(videoId, title, selectedLang, lines, availableTracks) {
   sourceModal.classList.add('hidden');
   scoreModal.classList.add('hidden');
   resetStats();
-  goToLine(0, true);
+
+  // Cue the video paused first so it doesn't auto-play unexpectedly; only play when user starts or race starts
+  if (isPlayerReady && player && player.cueVideoById) {
+    player.cueVideoById(currentVideoId);
+  }
+  goToLine(0, !currentRoomCode);
   focusTyping();
 
   if (isRoomHost && currentRoomCode) {
@@ -852,9 +931,15 @@ function applyLoadedClip(videoId, title, selectedLang, lines, availableTracks) {
 
 function resetStats() {
   startTime = null;
-  totalTypedChars = 0;
-  totalCorrectChars = 0;
+  isGameFinished = false;
+  completedLinesChars = 0;
+  completedCorrectChars = 0;
+  currentLineCorrectChars = 0;
+  currentLineTypedChars = 0;
   updateStatsUI();
+  if (currentRoomCode) {
+    syncMyProgressToRoom();
+  }
 }
 
 function updateStatsUI() {
@@ -896,12 +981,23 @@ function renderTargetSentence(targetText, typedText) {
   renderKeyboard(nextExpectedChar);
 }
 
+function commitCurrentLineStats() {
+  const line = transcriptLines[currentLineIndex];
+  if (!line) return;
+  completedLinesChars += line.text.length;
+  completedCorrectChars += countCorrectCharsInLine(line.text, hiddenInput.value);
+  currentLineCorrectChars = 0;
+  currentLineTypedChars = 0;
+}
+
 function goToLine(index, seekVideo = true) {
   if (!transcriptLines.length) return;
   currentLineIndex = Math.max(0, Math.min(index, transcriptLines.length - 1));
   const line = transcriptLines[currentLineIndex];
 
   hiddenInput.value = '';
+  currentLineCorrectChars = 0;
+  currentLineTypedChars = 0;
   waitingForTypingToFinish = false;
 
   timestampPill.textContent = formatTime(line.start);
@@ -912,7 +1008,7 @@ function goToLine(index, seekVideo = true) {
   renderTargetSentence(line.text, '');
   updateStatsUI();
 
-  if (seekVideo && isPlayerReady && player && typeof player.seekTo === 'function') {
+  if (seekVideo && !isGameFinished && isPlayerReady && player && typeof player.seekTo === 'function') {
     player.seekTo(Math.max(0, line.start), true);
     player.playVideo();
   }
@@ -929,13 +1025,14 @@ function checkAndAdvanceIfLineComplete() {
   const line = transcriptLines[currentLineIndex];
   if (!line) return;
   if (hiddenInput.value === line.text) {
+    commitCurrentLineStats();
     if (currentLineIndex < transcriptLines.length - 1) {
       const shouldSeek = !waitingForTypingToFinish;
       goToLine(currentLineIndex + 1, shouldSeek);
-      if (isPlayerReady && player) {
+      if (!isGameFinished && isPlayerReady && player) {
         player.playVideo();
       }
-      syncMyProgressToRoom(false);
+      syncMyProgressToRoom();
     } else {
       showScoreSummary();
     }
@@ -943,7 +1040,7 @@ function checkAndAdvanceIfLineComplete() {
 }
 
 hiddenInput.addEventListener('input', () => {
-  if (!transcriptLines.length) return;
+  if (!transcriptLines.length || isGameFinished) return;
   const line = transcriptLines[currentLineIndex];
   if (!line) return;
 
@@ -964,15 +1061,12 @@ hiddenInput.addEventListener('input', () => {
     }
   }
 
-  totalTypedChars++;
-  const latestIdx = typed.length - 1;
-  if (latestIdx >= 0 && typed[latestIdx] === target[latestIdx]) {
-    totalCorrectChars++;
-  }
+  currentLineTypedChars = Math.max(typed.length, currentLineTypedChars);
+  currentLineCorrectChars = countCorrectCharsInLine(target, typed);
 
   renderTargetSentence(target, typed);
   updateStatsUI();
-  syncMyProgressToRoom(false);
+  syncMyProgressToRoom();
   checkAndAdvanceIfLineComplete();
 });
 
@@ -998,10 +1092,11 @@ window.addEventListener('keydown', (e) => {
 
   if (e.key === 'Enter') {
     e.preventDefault();
-    if (!transcriptLines.length) return;
+    if (!transcriptLines.length || isGameFinished) return;
+    commitCurrentLineStats();
     if (currentLineIndex < transcriptLines.length - 1) {
       goToLine(currentLineIndex + 1, true);
-      syncMyProgressToRoom(false);
+      syncMyProgressToRoom();
     } else {
       showScoreSummary();
     }
@@ -1014,7 +1109,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 function replayCurrentLine() {
-  if (!transcriptLines.length) return;
+  if (!transcriptLines.length || isGameFinished) return;
   const line = transcriptLines[currentLineIndex];
   if (isPlayerReady && player) {
     player.seekTo(Math.max(0, line.start), true);
@@ -1031,29 +1126,40 @@ typingStage.addEventListener('click', (e) => {
 
 replayBtn.addEventListener('click', replayCurrentLine);
 prevLineBtn.addEventListener('click', () => {
-  if (currentLineIndex > 0) goToLine(currentLineIndex - 1, true);
+  if (currentLineIndex > 0 && !isGameFinished) goToLine(currentLineIndex - 1, true);
   focusTyping();
 });
 nextLineBtn.addEventListener('click', () => {
+  if (!transcriptLines.length || isGameFinished) return;
+  commitCurrentLineStats();
   if (currentLineIndex < transcriptLines.length - 1) {
     goToLine(currentLineIndex + 1, true);
+    syncMyProgressToRoom();
     focusTyping();
   } else {
     showScoreSummary();
   }
 });
-finishBtn.addEventListener('click', showScoreSummary);
+finishBtn.addEventListener('click', () => {
+  commitCurrentLineStats();
+  showScoreSummary();
+});
 
+// When clicking "หาเพลงใหม่ / เลือกคลิปใหม่" after finishing, pause video and open Search Modal!
 playAgainBtn.addEventListener('click', () => {
+  isGameFinished = true;
+  if (isPlayerReady && player && player.pauseVideo) {
+    player.pauseVideo();
+  }
   scoreModal.classList.add('hidden');
-  resetStats();
-  goToLine(0, true);
-  focusTyping();
+  sourceModal.classList.remove('hidden');
+  ytSearchInput.value = '';
+  ytSearchInput.focus();
 });
 
 shareResultBtn.addEventListener('click', async () => {
   const m = getCurrentMetrics();
-  const msg = `typetube — ${currentVideoTitle}\nRank: ${m.rank} (${m.score.toLocaleString()} pts) | ${m.wpm} WPM | ${m.acc}%\n${window.location.href}`;
+  const msg = `typetube — ${currentVideoTitle}\nRank: ${m.rank} (${m.score.toLocaleString()} pts) | แม่นยำ ${m.acc}% | ${m.wpm} WPM\n${window.location.href}`;
   try {
     await navigator.clipboard.writeText(msg);
     showToast('คัดลอกผลคะแนนแล้ว');
@@ -1091,7 +1197,7 @@ ytSearchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') handleSearchOrLoad();
 });
 
-// Room Modal
+// Room Modal & Nickname change
 openRoomModalBtn.addEventListener('click', () => {
   roomModal.classList.remove('hidden');
   playerNameInput.focus();
@@ -1107,6 +1213,10 @@ joinRoomBtn.addEventListener('click', () => {
 joinRoomCodeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') joinMultiplayerRoom(joinRoomCodeInput.value);
 });
+
+if (changeNameBtn) {
+  changeNameBtn.addEventListener('click', promptChangePlayerName);
+}
 
 copyRoomLinkBtn.addEventListener('click', async () => {
   const u = new URL(window.location.href);
@@ -1142,7 +1252,6 @@ window.addEventListener('DOMContentLoaded', () => {
   const urlLang = params.get('lang') || 'th';
   const roomParam = params.get('room');
 
-  // Only load a video if explicitly passed in URL (`?v=...`); otherwise wait for user to search/select
   if (urlVid) {
     loadClip(urlVid, urlLang);
   } else {
