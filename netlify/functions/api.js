@@ -396,6 +396,90 @@ function mergeShortSegments(lines) {
   return cleaned;
 }
 
+// In-memory cache inside warm serverless container to save API quota
+const SERVER_TRANSCRIPT_CACHE = new Map();
+
+// Fetch transcript via Supadata API (https://supadata.ai) — works 100% on Netlify without IP blocks
+async function fetchViaSupadata(videoId, preferredLang, apiKey) {
+  const langParam = preferredLang ? `&lang=${encodeURIComponent(preferredLang.replace(/^[a.]*\./, ''))}` : '';
+  const url = `https://api.supadata.ai/v1/youtube/transcript?videoId=${encodeURIComponent(videoId)}${langParam}`;
+  const res = await fetchUrl(url, {
+    headers: { 'x-api-key': apiKey }
+  });
+  if (res.status !== 200) {
+    throw new Error(`Supadata status ${res.status}: ${res.data.slice(0, 120)}`);
+  }
+  const data = JSON.parse(res.data);
+  const content = data.content || [];
+  const rawLines = content.map(item => {
+    const start = Number(((item.offset || 0) / 1000).toFixed(2));
+    const duration = Number(((item.duration || 3000) / 1000).toFixed(2));
+    return {
+      start,
+      end: Number((start + duration).toFixed(2)),
+      duration,
+      text: cleanSubtitleText(item.text || '')
+    };
+  }).filter(l => l.text.length > 0);
+
+  const availableLangs = (data.availableLangs || [data.lang || 'th']).map(code => ({
+    languageCode: code,
+    vssId: code,
+    name: code.toUpperCase(),
+    isAuto: false
+  }));
+
+  return {
+    selectedLanguage: data.lang || preferredLang || 'th',
+    selectedVssId: data.lang || preferredLang || 'th',
+    availableTracks: availableLangs,
+    lines: mergeShortSegments(rawLines)
+  };
+}
+
+// Fetch transcript via SearchAPI.io (https://www.searchapi.io) — works 100% on Netlify without IP blocks
+async function fetchViaSearchApi(videoId, preferredLang, apiKey) {
+  const langCode = (preferredLang || 'th').replace(/^[a.]*\./, '');
+  const url = `https://www.searchapi.io/api/v1/search?engine=youtube_transcripts&video_id=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(langCode)}&api_key=${encodeURIComponent(apiKey)}`;
+  const res = await fetchUrl(url);
+  const data = JSON.parse(res.data);
+
+  // If preferredLang wasn't available, SearchAPI returns `available_languages`; retry with first available
+  if ((!data.transcripts || !data.transcripts.length) && Array.isArray(data.available_languages) && data.available_languages.length > 0) {
+    const fallbackLang = data.available_languages.find(l => l.lang.startsWith('th'))?.lang ||
+                         data.available_languages.find(l => l.lang.startsWith('en'))?.lang ||
+                         data.available_languages[0].lang;
+    if (fallbackLang && fallbackLang !== langCode) {
+      return fetchViaSearchApi(videoId, fallbackLang, apiKey);
+    }
+  }
+
+  const rawLines = (data.transcripts || []).map(item => {
+    const start = Number(parseFloat(item.start || 0).toFixed(2));
+    const duration = Number(parseFloat(item.duration || 3).toFixed(2));
+    return {
+      start,
+      end: Number((start + duration).toFixed(2)),
+      duration,
+      text: cleanSubtitleText(item.text || '')
+    };
+  }).filter(l => l.text.length > 0);
+
+  const availableTracks = (data.available_languages || [{ lang: langCode, name: langCode.toUpperCase() }]).map(l => ({
+    languageCode: l.lang,
+    vssId: l.lang,
+    name: l.name || l.lang.toUpperCase(),
+    isAuto: false
+  }));
+
+  return {
+    selectedLanguage: langCode,
+    selectedVssId: langCode,
+    availableTracks,
+    lines: mergeShortSegments(rawLines)
+  };
+}
+
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
@@ -427,17 +511,62 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'ลิงก์หรือรหัสวิดีโอ YouTube ไม่ถูกต้อง' }) };
     }
 
+    const cacheKey = `${videoId}_${preferredLang || 'default'}`;
+    if (SERVER_TRANSCRIPT_CACHE.has(cacheKey)) {
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify(SERVER_TRANSCRIPT_CACHE.get(cacheKey))
+      };
+    }
+
     try {
+      const supadataKey = (process.env.SUPADATA_API_KEY || '').trim();
+      const searchApiKey = (process.env.SEARCHAPI_KEY || '').trim();
+
+      // 1. Try Supadata API if configured
+      if (supadataKey) {
+        try {
+          const sd = await fetchViaSupadata(videoId, preferredLang, supadataKey);
+          if (sd.lines && sd.lines.length > 0) {
+            const payload = {
+              videoId,
+              title: `YouTube (${videoId})`,
+              author: '',
+              ...sd
+            };
+            SERVER_TRANSCRIPT_CACHE.set(cacheKey, payload);
+            return { statusCode: 200, headers, body: JSON.stringify(payload) };
+          }
+        } catch (sdErr) {}
+      }
+
+      // 2. Try SearchAPI.io if configured
+      if (searchApiKey) {
+        try {
+          const sa = await fetchViaSearchApi(videoId, preferredLang, searchApiKey);
+          if (sa.lines && sa.lines.length > 0) {
+            const payload = {
+              videoId,
+              title: `YouTube (${videoId})`,
+              author: '',
+              ...sa
+            };
+            SERVER_TRANSCRIPT_CACHE.set(cacheKey, payload);
+            return { statusCode: 200, headers, body: JSON.stringify(payload) };
+          }
+        } catch (saErr) {}
+      }
+
       const { title, author, tracks, userAgent, lastStatus } = await getYouTubeCaptionTracks(videoId);
 
       if (!tracks || tracks.length === 0) {
-        const hasProxy = Boolean(getProxyConfig());
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({
-            error: lastStatus === 'LOGIN_REQUIRED' && !hasProxy
-              ? 'กรุณาตั้งค่า PROXY_URL (Webshare) ใน Netlify Environment Variables เพื่อปลดบล็อก IP ของ Netlify'
+            error: lastStatus === 'LOGIN_REQUIRED'
+              ? 'YouTube บล็อก Datacenter IP (กรุณาใส่ SUPADATA_API_KEY หรือ SEARCHAPI_KEY ฟรีใน Netlify Environment Variables)'
               : `คลิปนี้ไม่มีซับไตเติ้ลบน YouTube (${lastStatus || 'NO_TRACKS'})`,
             videoId,
             title,
