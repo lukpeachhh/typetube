@@ -703,6 +703,39 @@ function looksLikeYouTubeUrlOrId(input) {
   return input.includes('youtube.com/') || input.includes('youtu.be/');
 }
 
+// Helper: Fetch from Netlify API first; if YouTube blocks Netlify's cloud IP, automatically fall back to local residential server (http://localhost:3000)
+async function fetchApiWithLocalFallback(apiPath) {
+  try {
+    const res = await fetch(apiPath);
+    if (res.ok) {
+      return await res.json();
+    }
+    // If running on Netlify and YouTube blocked the datacenter IP, try localhost:3000 bridge
+    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      try {
+        const localRes = await fetch(`http://localhost:3000${apiPath}`);
+        if (localRes.ok) {
+          return await localRes.json();
+        }
+      } catch (localErr) {
+        // localhost:3000 not running on this machine
+      }
+    }
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || 'โหลดข้อมูลไม่สำเร็จ');
+  } catch (err) {
+    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      try {
+        const localRes = await fetch(`http://localhost:3000${apiPath}`);
+        if (localRes.ok) {
+          return await localRes.json();
+        }
+      } catch (e) {}
+    }
+    throw err;
+  }
+}
+
 async function handleSearchOrLoad() {
   const query = ytSearchInput.value.trim();
   if (!query) return;
@@ -716,11 +749,10 @@ async function handleSearchOrLoad() {
   modalErrorMsg.classList.add('hidden');
 
   try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-    const data = await res.json();
+    const data = await fetchApiWithLocalFallback(`/api/search?q=${encodeURIComponent(query)}`);
 
-    if (!res.ok || !data.results) {
-      modalErrorMsg.textContent = data.error || 'ไม่พบผลการค้นหา';
+    if (!data || !data.results) {
+      modalErrorMsg.textContent = 'ไม่พบผลการค้นหา';
       modalErrorMsg.classList.remove('hidden');
       return;
     }
@@ -768,18 +800,17 @@ async function loadClip(videoInput, preferredLang = '') {
   modalErrorMsg.classList.add('hidden');
 
   try {
-    const res = await fetch(`/api/transcript?v=${encodeURIComponent(videoInput)}&lang=${encodeURIComponent(preferredLang)}`);
-    const data = await res.json();
+    const data = await fetchApiWithLocalFallback(`/api/transcript?v=${encodeURIComponent(videoInput)}&lang=${encodeURIComponent(preferredLang)}`);
 
-    if (!res.ok || !data.lines || data.lines.length === 0) {
-      modalErrorMsg.textContent = data.error || 'คลิปนี้ไม่มีซับแท้ (Manual CC)';
+    if (!data || !data.lines || data.lines.length === 0) {
+      modalErrorMsg.textContent = (data && data.error) || 'คลิปนี้ไม่มีซับไตเติ้ล';
       modalErrorMsg.classList.remove('hidden');
       return;
     }
 
     applyLoadedClip(data.videoId, data.title, data.selectedLanguage || preferredLang, data.lines, data.availableTracks);
   } catch (err) {
-    modalErrorMsg.textContent = 'เกิดข้อผิดพลาดในการโหลดซับ: ' + err.message;
+    modalErrorMsg.textContent = err.message;
     modalErrorMsg.classList.remove('hidden');
   } finally {
     searchVideoBtn.disabled = false;
