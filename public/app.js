@@ -310,8 +310,8 @@ function normalizeThaiTypingOrder(str) {
   // Re-check decomposed Sara Am in case reordering placed \u0E4D + tone + \u0E32 together
   s = s.replace(/\u0E4D([\u0E48-\u0E4B])?[\u0E32\u0E33]/g, (_, tone) => (tone || '') + '\u0E33');
 
-  // Remove orphan combining marks that have no base consonant
-  s = s.replace(/(^|[^\u0E01-\u0E2E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1');
+  // Remove orphan combining marks that are not preceded by a Thai consonant or combining vowel
+  s = s.replace(/(^|[^\u0E01-\u0E2E\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1');
 
   return s;
 }

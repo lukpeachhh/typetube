@@ -91,7 +91,7 @@ function normalizeThaiTypingOrder(str) {
   });
 
   s = s.replace(/\u0E4D([\u0E48-\u0E4B])?[\u0E32\u0E33]/g, (_, tone) => (tone || '') + '\u0E33');
-  s = s.replace(/(^|[^\u0E01-\u0E2E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1');
+  s = s.replace(/(^|[^\u0E01-\u0E2E\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1');
   return s;
 }
 
