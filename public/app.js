@@ -272,16 +272,58 @@ function showToast(msg) {
   toast._timer = setTimeout(() => toast.classList.add('hidden'), 2600);
 }
 
+// Normalize Thai character sequence to match standard Thai Kedmanee keyboard typing order:
+// 1. Convert decomposed Sara Am (นิคหิต \u0E4D + optional tone + \u0E32) -> (optional tone + \u0E33)
+// 2. Enforce standard typing order: Base Consonant -> Above/Below Vowel (\u0E31, \u0E34-\u0E3A, \u0E47) -> Tone Mark (\u0E48-\u0E4C)
+// 3. Deduplicate invisible stacked vowels or stacked tone marks on the same consonant
+function normalizeThaiTypingOrder(str) {
+  if (!str) return '';
+  let s = str.normalize('NFC');
+
+  // Fix decomposed Sara Am with tone mark: e.g. น + ํ (\u0E4D) + ้ (\u0E48-\u0E4B) + า (\u0E32 or \u0E33) -> น + ้ + ำ (\u0E33)
+  s = s.replace(/\u0E4D([\u0E48-\u0E4B])[\u0E32\u0E33]/g, '$1\u0E33');
+  // Fix decomposed Sara Am without tone mark: ํ + า -> ำ
+  s = s.replace(/\u0E4D[\u0E32\u0E33]/g, '\u0E33');
+  // Fix tone mark typed AFTER Sara Am (ำ + ้ -> ้ + ำ) so both orders match standard Kedmanee (วรรณยุกต์ก่อนสระอำ)
+  s = s.replace(/\u0E33([\u0E48-\u0E4B])/g, '$1\u0E33');
+
+  // Fix double Sara E -> Sara Ae
+  s = s.replace(/\u0E40\u0E40/g, '\u0E41');
+
+  // Reorder any sequence of Thai combining marks on a consonant:
+  // Vowels (\u0E31, \u0E34-\u0E3A, \u0E47, \u0E4D) MUST come before Tone/Thanthakhat marks (\u0E48-\u0E4C),
+  // and keep at most ONE vowel and ONE tone mark per consonant to eliminate invisible stacked duplicate bugs!
+  s = s.replace(/([\u0E01-\u0E2E])([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+)/g, (_, base, marks) => {
+    let vowel = '';
+    let tone = '';
+    for (const ch of marks) {
+      const code = ch.charCodeAt(0);
+      if (code === 0x0E31 || (code >= 0x0E34 && code <= 0x0E3A) || code === 0x0E47 || code === 0x0E4D) {
+        if (!vowel) vowel = ch; // Keep first above/below vowel, drop invisible duplicates
+      } else if (code >= 0x0E48 && code <= 0x0E4C) {
+        if (!tone) tone = ch; // Keep first tone mark, drop invisible duplicates
+      }
+    }
+    return base + vowel + tone;
+  });
+
+  // Re-check decomposed Sara Am in case reordering placed \u0E4D + tone + \u0E32 together
+  s = s.replace(/\u0E4D([\u0E48-\u0E4B])?[\u0E32\u0E33]/g, (_, tone) => (tone || '') + '\u0E33');
+
+  // Remove orphan combining marks that have no base consonant
+  s = s.replace(/(^|[^\u0E01-\u0E2E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1');
+
+  return s;
+}
+
 function normalizeTextForTyping(str) {
   if (!str) return '';
-  return str
+  const cleaned = str
     .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}♪♫♬]/gu, '')
     .replace(/\u200B|\u200C|\u200D|\uFEFF|\uFE0F/g, '')
-    .replace(/\u0E4D\u0E32/g, '\u0E33')
-    .replace(/เเ/g, 'แ')
-    .replace(/(^|\s)[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1')
     .replace(/[.,?!"';:()[\]{}—–\-…/\\|@#$%^&*_+=<>~`«»“”‘’]/g, ' ')
-    .replace(/\u00A0/g, ' ')
+    .replace(/\u00A0/g, ' ');
+  return normalizeThaiTypingOrder(cleaned)
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1067,9 +1109,10 @@ hiddenInput.addEventListener('input', () => {
     startTime = Date.now();
   }
 
-  let typed = hiddenInput.value
-    .replace(/\u0E4D\u0E32/g, '\u0E33')
-    .replace(/เเ/g, 'แ');
+  let typed = normalizeThaiTypingOrder(hiddenInput.value);
+  if (typed !== hiddenInput.value) {
+    hiddenInput.value = typed;
+  }
   const target = line.text;
 
   if (typed.length <= target.length) {

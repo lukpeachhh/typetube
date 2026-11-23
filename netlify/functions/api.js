@@ -155,6 +155,33 @@ function decodeHtmlEntities(str) {
     .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
 }
 
+function normalizeThaiTypingOrder(str) {
+  if (!str) return '';
+  let s = str.normalize('NFC');
+  s = s.replace(/\u0E4D([\u0E48-\u0E4B])[\u0E32\u0E33]/g, '$1\u0E33');
+  s = s.replace(/\u0E4D[\u0E32\u0E33]/g, '\u0E33');
+  s = s.replace(/\u0E33([\u0E48-\u0E4B])/g, '$1\u0E33');
+  s = s.replace(/\u0E40\u0E40/g, '\u0E41');
+
+  s = s.replace(/([\u0E01-\u0E2E])([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+)/g, (_, base, marks) => {
+    let vowel = '';
+    let tone = '';
+    for (const ch of marks) {
+      const code = ch.charCodeAt(0);
+      if (code === 0x0E31 || (code >= 0x0E34 && code <= 0x0E3A) || code === 0x0E47 || code === 0x0E4D) {
+        if (!vowel) vowel = ch;
+      } else if (code >= 0x0E48 && code <= 0x0E4C) {
+        if (!tone) tone = ch;
+      }
+    }
+    return base + vowel + tone;
+  });
+
+  s = s.replace(/\u0E4D([\u0E48-\u0E4B])?[\u0E32\u0E33]/g, (_, tone) => (tone || '') + '\u0E33');
+  s = s.replace(/(^|[^\u0E01-\u0E2E])[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1');
+  return s;
+}
+
 function cleanSubtitleText(text) {
   if (!text) return '';
   let out = decodeHtmlEntities(text.replace(/<[^>]+>/g, ''))
@@ -162,11 +189,9 @@ function cleanSubtitleText(text) {
     .replace(/\[.*?\]/g, '')
     .replace(/\(.*?\)/g, '')
     .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}♪♫♬]/gu, '')
-    .replace(/\u200B|\u200C|\u200D|\uFEFF|\uFE0F/g, '')
-    .replace(/\u0E4D\u0E32/g, '\u0E33')
-    .replace(/เเ/g, 'แ')
-    .replace(/(^|\s)[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]+/g, '$1')
-    .replace(/([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])\1+/g, '$1')
+    .replace(/\u200B|\u200C|\u200D|\uFEFF|\uFE0F/g, '');
+
+  out = normalizeThaiTypingOrder(out)
     .replace(/([\u0E00-\u0E7F])\s+(ๆ)/g, '$1$2')
     .replace(/^[-–—>•]+\s*/g, '')
     .replace(/\s+/g, ' ')
